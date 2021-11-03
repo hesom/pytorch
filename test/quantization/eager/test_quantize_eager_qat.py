@@ -24,6 +24,7 @@ from torch.ao.quantization import (
 from torch.testing._internal.common_utils import TestCase
 
 from torch.testing._internal.common_quantization import (
+    DeFusedEmbeddingBagLinear,
     QuantizationTestCase,
     QuantStubModel,
     ManualLinearQATModel,
@@ -47,6 +48,15 @@ hu.assert_deadline_disabled()
 from functools import reduce
 
 class TestQuantizationAwareTraining(QuantizationTestCase):
+    def setUp(self):
+        super().setUp()
+
+        self.embed_linear_data_train = [[torch.randint(0, 10, (12, 12), dtype=torch.long),
+                                         torch.randn((12, 1), dtype=torch.float)]
+                                        for _ in range(2)]
+        self.embed_data = [[torch.randint(0, 10, (12, 1))]]
+
+
     def test_manual(self):
         for qengine in supported_qengines:
             with override_quantized_engine(qengine):
@@ -109,6 +119,35 @@ class TestQuantizationAwareTraining(QuantizationTestCase):
                 model = quantize_qat(model, test_only_train_fn, [self.img_data_2d_train])
                 checkQuantized(model)
 
+    def test_defused_embedding_bag_linear(self):
+        for qengine in supported_qengines:
+            with override_quantized_engine(qengine):
+                model = DeFusedEmbeddingBagLinear().train()
+                model = prepare_qat(model)
+                self.checkObservers(model)
+
+                test_only_train_fn(model, self.embed_linear_data_train)
+                # make activation_post_process is not inserted for Embedding
+                self.assertFalse(hasattr(model, "activation_post_process"))
+                model = convert(model)
+
+                def checkQuantized(model):
+                    # make sure Embedding is now a QuantizedEmbedding
+                    self.assertEqual(type(model.emb), nn.quantized.Embedding)
+                    # make sure Linear is now a QuantizedLinear
+                    self.assertEqual(type(model.linear), nn.quantized.Linear)
+
+                    test_only_eval_fn(model, self.embed_data)
+                    self.checkScriptable(model, self.embed_data)
+                    self.checkNoQconfig(model)
+
+                checkQuantized(model)
+
+                model = DeFusedEmbeddingBagLinear()
+                model = quantize_qat(model, test_only_train_fn, [self.embed_linear_data_train])
+                checkQuantized(model)
+
+
     def test_embedding_bag_linear(self):
         for qengine in supported_qengines:
             with override_quantized_engine(qengine):
@@ -116,10 +155,7 @@ class TestQuantizationAwareTraining(QuantizationTestCase):
                 model = prepare_qat(model)
                 self.checkObservers(model)
 
-                train_indices = [[torch.randint(0, 10, (12, 12)), torch.randn((12, 1))] for _ in range(2)]
-                eval_output = [[torch.randint(0, 10, (12, 1))]]
-
-                test_only_train_fn(model, train_indices)
+                test_only_train_fn(model, self.embed_linear_data_train)
                 # make sure not activation_post_process is inserted for EmbeddingBag
                 self.assertFalse(hasattr(model, "activation_post_process"))
                 model = convert(model)
@@ -130,14 +166,14 @@ class TestQuantizationAwareTraining(QuantizationTestCase):
                     # Also test that Linear has been quantized.
                     self.assertTrue(type(model.linear), nnq.Linear)
 
-                    test_only_eval_fn(model, eval_output)
-                    self.checkScriptable(model, eval_output)
+                    test_only_eval_fn(model, self.embed_data)
+                    self.checkScriptable(model, self.embed_data)
                     self.checkNoQconfig(model)
 
                 checkQuantized(model)
 
                 model = ManualEmbeddingBagLinear()
-                model = quantize_qat(model, test_only_train_fn, [train_indices])
+                model = quantize_qat(model, test_only_train_fn, [self.embed_linear_data_train])
                 checkQuantized(model)
 
     def test_train_save_load_eval(self):
@@ -779,7 +815,7 @@ class TestConvBNQATModule(TestCase):
         ).to(dtype=torch.double)
 
         qat_op.apply(torch.ao.quantization.disable_fake_quant)
-        qat_ref_op.apply(torch.quantization.disable_fake_quant)
+        qat_ref_op.apply(torch.ao.quantization.disable_fake_quant)
 
         # align inputs and internal parameters
         qat_ref_op.weight = torch.nn.Parameter(qat_op.weight.detach().clone())
