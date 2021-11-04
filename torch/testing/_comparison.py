@@ -4,6 +4,7 @@ import collections.abc
 from typing import NamedTuple, Callable, Sequence, List, Union, Optional, Type, Tuple, Any, cast
 
 import torch
+from torch._C import ScriptDict  # type: ignore[attr-defined]
 
 from ._core import _unravel_index
 
@@ -20,6 +21,8 @@ class ErrorMeta(NamedTuple):
         return self.type(msg)
 
 
+# Some analysis of tolerance by logging tests from test_torch.py can be found in
+# https://github.com/pytorch/pytorch/pull/32538.
 _DTYPE_PRECISIONS = {
     torch.float16: (0.001, 1e-5),
     torch.bfloat16: (0.016, 1e-5),
@@ -110,7 +113,7 @@ def make_scalar_mismatch_msg(
     identifier: Optional[Union[str, Callable[[str], str]]] = None,
 ) -> str:
     abs_diff = abs(actual - expected)
-    rel_diff = abs_diff / abs(expected)
+    rel_diff = float("inf") if expected == 0 else abs_diff / abs(expected)
     return _make_mismatch_msg(
         identifier=identifier,
         default_identifier="Scalars",
@@ -264,6 +267,7 @@ class NumberPair(Pair):
         float: torch.float64,
         complex: torch.complex128,
     }
+    _NUMBER_TYPES = tuple(_TYPE_TO_DTYPE.keys())
 
     def __init__(
         self,
@@ -277,7 +281,7 @@ class NumberPair(Pair):
         check_dtype: bool = False,
         **other_parameters: Any,
     ) -> None:
-        self._check_inputs_isinstance(actual, expected, cls=tuple(self._TYPE_TO_DTYPE.keys()))
+        self._check_inputs_isinstance(actual, expected, cls=self._NUMBER_TYPES)
         error_meta, tolerances = parse_tolerances(
             *[self._TYPE_TO_DTYPE.get(type(input), torch.float64) for input in (actual, expected)], rtol=rtol, atol=atol
         )
@@ -647,7 +651,9 @@ def originate_pairs(
 
         return None, pairs
 
-    elif isinstance(actual, collections.abc.Mapping) and isinstance(expected, collections.abc.Mapping):
+    elif isinstance(actual, (collections.abc.Mapping, ScriptDict)) and isinstance(
+        expected, (collections.abc.Mapping, ScriptDict)
+    ):
         actual_keys = set(actual.keys())
         expected_keys = set(expected.keys())
         if actual_keys != expected_keys:
